@@ -64,14 +64,97 @@ class Transcriber:
         Returns:
             List of transcript segments
         """
+        s3_key_to_cleanup = None  # Track S3 key for cleanup
         try:
+            import os
+            audio_file_size = os.path.getsize(audio_path)
+            audio_file_size_mb = audio_file_size / (1024 * 1024)
+            
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TIMEOUT_A",
+                    "location": "transcriber.py:67",
+                    "message": "Audio file size check before transcription",
+                    "data": {
+                        "audio_path": audio_path,
+                        "file_size_bytes": audio_file_size,
+                        "file_size_mb": round(audio_file_size_mb, 2),
+                        "file_size_gb": round(audio_file_size_mb / 1024, 2)
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
+            # Deepgram has limits: free tier is 300MB, paid tiers vary
+            # For large files, use URL-based transcription if available
+            MAX_BUFFER_SIZE_MB = 200  # Conservative limit for buffer upload
+            
+            # Check if we should use URL-based transcription for large files
+            use_url_transcription = (
+                settings.deepgram_use_url_for_large_files and 
+                audio_file_size_mb > settings.deepgram_large_file_threshold_mb and
+                settings.s3_bucket_name  # Need S3 to host the file
+            )
+            
+            if audio_file_size_mb > MAX_BUFFER_SIZE_MB and not use_url_transcription:
+                raise RuntimeError(
+                    f"Audio file too large ({audio_file_size_mb:.1f}MB). "
+                    f"Deepgram buffer upload limit is typically 200-300MB. "
+                    f"Please configure S3_BUCKET_NAME to enable URL-based transcription for large files."
+                )
+            
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TIMEOUT_B",
+                    "location": "transcriber.py:90",
+                    "message": "Reading audio file into buffer",
+                    "data": {
+                        "file_size_mb": round(audio_file_size_mb, 2),
+                        "starting_read": True
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
             with open(audio_path, "rb") as audio_file:
                 buffer_data = audio_file.read()
             
-            payload: FileSource = {
-                "buffer": buffer_data,
-            }
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TIMEOUT_C",
+                    "location": "transcriber.py:105",
+                    "message": "Audio file read complete, preparing payload",
+                    "data": {
+                        "buffer_size_bytes": len(buffer_data),
+                        "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2),
+                        "payload_ready": True
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
             
+            # Prepare options
             options = PrerecordedOptions(
                 model="nova-2",
                 language="en-US",
@@ -81,6 +164,74 @@ class Transcriber:
                 utterances=True,
                 paragraphs=True
             )
+            
+            # Use URL-based transcription for large files if S3 is configured
+            s3_key_to_cleanup = None
+            if use_url_transcription:
+                # #region agent log
+                try:
+                    log_data = {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "TIMEOUT_URL",
+                        "location": "transcriber.py:130",
+                        "message": "Using URL-based transcription for large file",
+                        "data": {
+                            "file_size_mb": round(audio_file_size_mb, 2),
+                            "s3_bucket": settings.s3_bucket_name
+                        },
+                        "timestamp": int(__import__("time").time() * 1000)
+                    }
+                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                        f.write(json.dumps(log_data) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                
+                # Upload to S3 first, then transcribe from URL
+                import boto3
+                from pathlib import Path
+                import uuid
+                
+                client_kwargs = {
+                    'aws_access_key_id': settings.aws_access_key_id,
+                    'aws_secret_access_key': settings.aws_secret_access_key,
+                    'region_name': settings.aws_region
+                }
+                if settings.aws_session_token:
+                    client_kwargs['aws_session_token'] = settings.aws_session_token
+                
+                s3_client = boto3.client('s3', **client_kwargs)
+                
+                # Upload audio to S3
+                audio_filename = Path(audio_path).name
+                s3_key_to_cleanup = f"audio/{uuid.uuid4()}_{audio_filename}"
+                
+                try:
+                    s3_client.upload_file(audio_path, settings.s3_bucket_name, s3_key)
+                    # Generate presigned URL (valid for 1 hour)
+                    audio_url = s3_client.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': settings.s3_bucket_name, 'Key': s3_key_to_cleanup},
+                        ExpiresIn=3600
+                    )
+                    
+                    # Use URL-based transcription
+                    payload: FileSource = {
+                        "url": audio_url,
+                    }
+                except Exception as s3_err:
+                    # Fallback to buffer if S3 upload fails
+                    print(f"Warning: S3 upload failed ({s3_err}), falling back to buffer upload")
+                    s3_key_to_cleanup = None  # Don't cleanup if upload failed
+                    payload: FileSource = {
+                        "buffer": buffer_data,
+                    }
+            else:
+                # Use buffer-based transcription for smaller files
+                payload: FileSource = {
+                    "buffer": buffer_data,
+                }
             
             # #region agent log
             try:
@@ -235,9 +386,108 @@ class Transcriber:
                 pass
             # #endregion
             
-            response = self.client.listen.prerecorded.v("1").transcribe_file(
-                payload, options
-            )
+            # #region agent log
+            try:
+                import time
+                api_call_start = time.time()
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TIMEOUT_D",
+                    "location": "transcriber.py:250",
+                    "message": "About to call Deepgram transcribe_file API",
+                    "data": {
+                        "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2),
+                        "api_call_start_time": api_call_start
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
+            # Use transcribe_file with timeout handling
+            # Deepgram SDK should handle timeouts, but we'll wrap it to catch timeout errors
+            # For very large files, URL-based transcription is more reliable
+            try:
+                # #region agent log
+                try:
+                    payload_type = "url" if "url" in payload else "buffer"
+                    log_data = {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "TIMEOUT_G",
+                        "location": "transcriber.py:320",
+                        "message": "Calling transcribe_file with payload",
+                        "data": {
+                            "payload_type": payload_type,
+                            "has_url": "url" in payload,
+                            "has_buffer": "buffer" in payload,
+                            "buffer_size_mb": round(len(payload.get("buffer", b"")) / (1024 * 1024), 2) if "buffer" in payload else 0
+                        },
+                        "timestamp": int(__import__("time").time() * 1000)
+                    }
+                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                        f.write(json.dumps(log_data) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                
+                response = self.client.listen.prerecorded.v("1").transcribe_file(
+                    payload, options
+                )
+                
+                # #region agent log
+                try:
+                    api_call_end = time.time()
+                    api_call_duration = api_call_end - api_call_start
+                    log_data = {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "TIMEOUT_E",
+                        "location": "transcriber.py:270",
+                        "message": "Deepgram API call completed successfully",
+                        "data": {
+                            "api_call_duration_seconds": round(api_call_duration, 2),
+                            "success": True
+                        },
+                        "timestamp": int(__import__("time").time() * 1000)
+                    }
+                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                        f.write(json.dumps(log_data) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+            except Exception as api_err:
+                # #region agent log
+                try:
+                    api_call_end = time.time()
+                    api_call_duration = api_call_end - api_call_start if 'api_call_start' in locals() else None
+                    error_str = str(api_err).lower()
+                    is_timeout = 'timeout' in error_str or 'timed out' in error_str
+                    log_data = {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "TIMEOUT_F",
+                        "location": "transcriber.py:285",
+                        "message": "Deepgram API call failed",
+                        "data": {
+                            "error_type": str(type(api_err).__name__),
+                            "error_message": str(api_err),
+                            "is_timeout_error": is_timeout,
+                            "api_call_duration_seconds": round(api_call_duration, 2) if api_call_duration else None,
+                            "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2)
+                        },
+                        "timestamp": int(__import__("time").time() * 1000)
+                    }
+                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                        f.write(json.dumps(log_data) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                raise
             
             # #region agent log
             try:
@@ -436,9 +686,40 @@ class Transcriber:
                                 speaker=None
                             ))
             
+            # Clean up S3 file if we used URL-based transcription
+            if s3_key_to_cleanup:
+                try:
+                    import boto3
+                    client_kwargs = {
+                        'aws_access_key_id': settings.aws_access_key_id,
+                        'aws_secret_access_key': settings.aws_secret_access_key,
+                        'region_name': settings.aws_region
+                    }
+                    if settings.aws_session_token:
+                        client_kwargs['aws_session_token'] = settings.aws_session_token
+                    s3_client = boto3.client('s3', **client_kwargs)
+                    s3_client.delete_object(Bucket=settings.s3_bucket_name, Key=s3_key_to_cleanup)
+                except Exception as cleanup_err:
+                    print(f"Warning: Failed to cleanup S3 file {s3_key_to_cleanup}: {cleanup_err}")
+            
             return segments
         
         except Exception as e:
+            # Clean up S3 file on error if we used URL-based transcription
+            if 's3_key_to_cleanup' in locals() and s3_key_to_cleanup:
+                try:
+                    import boto3
+                    client_kwargs = {
+                        'aws_access_key_id': settings.aws_access_key_id,
+                        'aws_secret_access_key': settings.aws_secret_access_key,
+                        'region_name': settings.aws_region
+                    }
+                    if settings.aws_session_token:
+                        client_kwargs['aws_session_token'] = settings.aws_session_token
+                    s3_client = boto3.client('s3', **client_kwargs)
+                    s3_client.delete_object(Bucket=settings.s3_bucket_name, Key=s3_key_to_cleanup)
+                except Exception:
+                    pass
             # #region agent log
             try:
                 log_data = {

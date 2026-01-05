@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     
     # Deepgram Configuration
     deepgram_api_key: Optional[str] = None
+    deepgram_use_url_for_large_files: bool = True  # Use URL-based transcription for files > 50MB
+    deepgram_large_file_threshold_mb: float = 50.0  # Files larger than this use URL-based transcription
     
     # Bedrock Configuration
     # Use inference profile format for on-demand throughput

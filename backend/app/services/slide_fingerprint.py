@@ -47,12 +47,73 @@ class SlideFingerprinter:
             # Use CLIP model (ViT-B/32)
             self.clip_model = SentenceTransformer('clip-ViT-B-32')
             print("CLIP model loaded successfully")
+            # #region agent log
+            try:
+                import json as json_module
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "CLIP_INIT",
+                    "location": "slide_fingerprint.py:_init_clip_model",
+                    "message": "CLIP model initialized successfully",
+                    "data": {"success": True},
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json_module.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
         except ImportError:
             print("Warning: sentence-transformers not installed. CLIP embeddings will not work.")
+            print("  Install with: pip install sentence-transformers")
+            print("  Slide deduplication will use text-only method when CLIP is unavailable.")
             self.clip_model = None
+            # #region agent log
+            try:
+                import json as json_module
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "CLIP_INIT_FAILED",
+                    "location": "slide_fingerprint.py:_init_clip_model",
+                    "message": "CLIP model initialization failed - ImportError",
+                    "data": {
+                        "error_type": "ImportError",
+                        "error_message": "sentence-transformers not installed",
+                        "impact": "CLIP embeddings unavailable, will use text-only deduplication"
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json_module.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
         except Exception as e:
             print(f"Warning: Failed to load CLIP model: {e}")
             self.clip_model = None
+            # #region agent log
+            try:
+                import json as json_module
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "CLIP_INIT_FAILED",
+                    "location": "slide_fingerprint.py:_init_clip_model",
+                    "message": "CLIP model initialization failed",
+                    "data": {
+                        "error_type": str(type(e).__name__),
+                        "error_message": str(e),
+                        "impact": "CLIP embeddings unavailable"
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json_module.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
     
     def _normalize_text(self, text: str) -> str:
         """Normalize text for comparison."""

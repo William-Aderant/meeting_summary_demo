@@ -72,8 +72,9 @@ async def get_slide_image(job_id: str, slide_id: str):
     with open(results_file, "r") as f:
         results_data = json.load(f)
     
-    # Find the slide
-    slide = next((s for s in results_data["slides"] if s["slide_id"] == slide_id), None)
+    # Find the slide (check if slides exist in results)
+    slides = results_data.get("slides", [])
+    slide = next((s for s in slides if s["slide_id"] == slide_id), None)
     
     if not slide:
         raise HTTPException(

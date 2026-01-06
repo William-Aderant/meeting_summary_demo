@@ -13,10 +13,35 @@ class ProcessingStatus(str, Enum):
     ERROR = "error"
 
 
+class ProcessingOptions(BaseModel):
+    """Processing options for video analysis."""
+    enable_transcription: bool = True
+    enable_slide_detection: bool = True
+    enable_summarization: bool = True
+    enable_slide_summaries: bool = False  # Generate individual summaries for each slide
+    return_transcript: bool = True
+    return_slides: bool = True
+    deduplication_method: str = "both"  # "both", "text_only", "visual_only"
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "enable_transcription": True,
+                "enable_slide_detection": True,
+                "enable_summarization": True,
+                "enable_slide_summaries": False,
+                "return_transcript": True,
+                "return_slides": True,
+                "deduplication_method": "both"
+            }
+        }
+
+
 class VideoUploadRequest(BaseModel):
     """Video upload request model."""
     filename: str
     content_type: str
+    processing_options: Optional[ProcessingOptions] = None
 
 
 class VideoUploadResponse(BaseModel):
@@ -112,9 +137,9 @@ class MeetingSummary(BaseModel):
 class ProcessingResults(BaseModel):
     """Final processing results."""
     job_id: str
-    summary: MeetingSummary
-    slides: List[UniqueSlide]
-    transcript: List[TranscriptSegment]
+    summary: Optional[MeetingSummary] = None
+    slides: List[UniqueSlide] = []
+    transcript: List[TranscriptSegment] = []
     video_duration: float  # seconds
     processed_at: datetime
 

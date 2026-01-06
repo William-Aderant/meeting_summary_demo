@@ -1,51 +1,35 @@
-"""Transcription service using Deepgram API."""
+"""Transcription service using AWS Transcribe."""
 import json
+import time
 from typing import List, Optional
-try:
-    from deepgram import DeepgramClient, PrerecordedOptions, FileSource
-except ImportError:
-    # Fallback for different Deepgram SDK versions
-    try:
-        from deepgram_sdk import DeepgramClient, PrerecordedOptions, FileSource
-    except ImportError:
-        DeepgramClient = None
+import boto3
+from botocore.exceptions import ClientError
 
 from app.config import settings
 from app.models.video import TranscriptSegment, TranscriptWord
 
 
 class Transcriber:
-    """Transcribes audio using Deepgram API."""
+    """Transcribes audio using AWS Transcribe."""
     
     def __init__(self):
-        if not settings.deepgram_api_key:
-            raise ValueError("DEEPGRAM_API_KEY not set")
+        if not (settings.aws_access_key_id and settings.aws_secret_access_key):
+            raise ValueError("AWS credentials not set")
         
-        if DeepgramClient is None:
-            raise ValueError("Deepgram SDK not installed")
+        if not settings.s3_bucket_name:
+            raise ValueError("S3_BUCKET_NAME not set (required for AWS Transcribe)")
         
-        self.client = DeepgramClient(settings.deepgram_api_key)
+        client_kwargs = {
+            'aws_access_key_id': settings.aws_access_key_id,
+            'aws_secret_access_key': settings.aws_secret_access_key,
+            'region_name': settings.aws_region
+        }
+        if settings.aws_session_token:
+            client_kwargs['aws_session_token'] = settings.aws_session_token
         
-        # #region agent log
-        try:
-            log_data = {
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": "A",
-                "location": "transcriber.py:26",
-                "message": "Inspecting Deepgram client structure",
-                "data": {
-                    "client_type": str(type(self.client)),
-                    "client_attrs": [attr for attr in dir(self.client) if not attr.startswith("_")],
-                    "has_listen": hasattr(self.client, "listen")
-                },
-                "timestamp": int(__import__("time").time() * 1000)
-            }
-            with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                f.write(json.dumps(log_data) + "\n")
-        except Exception:
-            pass
-        # #endregion
+        self.transcribe_client = boto3.client('transcribe', **client_kwargs)
+        self.s3_client = boto3.client('s3', **client_kwargs)
+        self.s3_bucket = settings.s3_bucket_name
     
     def transcribe_audio(
         self,
@@ -54,7 +38,7 @@ class Transcriber:
         enable_word_timestamps: bool = True
     ) -> List[TranscriptSegment]:
         """
-        Transcribe audio file using Deepgram.
+        Transcribe audio file using AWS Transcribe.
         
         Args:
             audio_path: Path to audio file
@@ -64,681 +48,532 @@ class Transcriber:
         Returns:
             List of transcript segments
         """
-        s3_key_to_cleanup = None  # Track S3 key for cleanup
+        import os
+        import uuid
+        from pathlib import Path
+        
+        # Validate that we're receiving an audio file, not a video file
+        audio_path_obj = Path(audio_path)
+        if not audio_path_obj.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        
+        # Check file extension to ensure it's an audio file
+        audio_ext = audio_path_obj.suffix.lower()
+        video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.flv', '.wmv'}
+        if audio_ext in video_extensions:
+            raise ValueError(
+                f"Expected audio file but received video file: {audio_path}. "
+                f"Please extract audio from video first using AudioExtractor."
+            )
+        
+        # Get file size to log (audio files should be much smaller than video)
+        file_size_mb = audio_path_obj.stat().st_size / (1024 * 1024)
+        
+        job_name = f"transcribe-{uuid.uuid4()}"
+        audio_filename = audio_path_obj.name
+        s3_audio_key = f"audio/{job_name}/{audio_filename}"
+        s3_output_key = f"transcripts/{job_name}.json"
+        
         try:
-            import os
-            audio_file_size = os.path.getsize(audio_path)
-            audio_file_size_mb = audio_file_size / (1024 * 1024)
-            
+            # Upload audio file to S3
             # #region agent log
             try:
                 log_data = {
                     "sessionId": "debug-session",
                     "runId": "run1",
-                    "hypothesisId": "TIMEOUT_A",
-                    "location": "transcriber.py:67",
-                    "message": "Audio file size check before transcription",
+                    "hypothesisId": "TRANSCRIBE_A",
+                    "location": "transcriber.py:upload",
+                    "message": "Uploading audio to S3 for transcription",
                     "data": {
                         "audio_path": audio_path,
-                        "file_size_bytes": audio_file_size,
-                        "file_size_mb": round(audio_file_size_mb, 2),
-                        "file_size_gb": round(audio_file_size_mb / 1024, 2)
+                        "audio_file_size_mb": round(file_size_mb, 2),
+                        "audio_extension": audio_ext,
+                        "s3_key": s3_audio_key,
+                        "job_name": job_name
                     },
-                    "timestamp": int(__import__("time").time() * 1000)
+                    "timestamp": int(time.time() * 1000)
                 }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
                     f.write(json.dumps(log_data) + "\n")
             except Exception:
                 pass
             # #endregion
             
-            # Deepgram has limits: free tier is 300MB, paid tiers vary
-            # For large files, use URL-based transcription if available
-            MAX_BUFFER_SIZE_MB = 200  # Conservative limit for buffer upload
-            
-            # Check if we should use URL-based transcription for large files
-            use_url_transcription = (
-                settings.deepgram_use_url_for_large_files and 
-                audio_file_size_mb > settings.deepgram_large_file_threshold_mb and
-                settings.s3_bucket_name  # Need S3 to host the file
-            )
-            
-            if audio_file_size_mb > MAX_BUFFER_SIZE_MB and not use_url_transcription:
-                raise RuntimeError(
-                    f"Audio file too large ({audio_file_size_mb:.1f}MB). "
-                    f"Deepgram buffer upload limit is typically 200-300MB. "
-                    f"Please configure S3_BUCKET_NAME to enable URL-based transcription for large files."
-                )
-            
-            # #region agent log
+            # Upload audio file to S3 (required for AWS Transcribe)
+            # Note: Only the extracted audio file is uploaded, not the full video
+            print(f"Uploading audio file to S3 for transcription: {audio_filename} ({file_size_mb:.2f} MB)")
             try:
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "TIMEOUT_B",
-                    "location": "transcriber.py:90",
-                    "message": "Reading audio file into buffer",
-                    "data": {
-                        "file_size_mb": round(audio_file_size_mb, 2),
-                        "starting_read": True
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            
-            with open(audio_path, "rb") as audio_file:
-                buffer_data = audio_file.read()
-            
-            # #region agent log
-            try:
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "TIMEOUT_C",
-                    "location": "transcriber.py:105",
-                    "message": "Audio file read complete, preparing payload",
-                    "data": {
-                        "buffer_size_bytes": len(buffer_data),
-                        "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2),
-                        "payload_ready": True
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            
-            # Prepare options
-            options = PrerecordedOptions(
-                model="nova-2",
-                language="en-US",
-                punctuate=True,
-                diarize=enable_speaker_diarization,
-                smart_format=True,
-                utterances=True,
-                paragraphs=True
-            )
-            
-            # Use URL-based transcription for large files if S3 is configured
-            s3_key_to_cleanup = None
-            if use_url_transcription:
+                self.s3_client.upload_file(audio_path, self.s3_bucket, s3_audio_key)
+                print(f"Successfully uploaded audio to S3: s3://{self.s3_bucket}/{s3_audio_key}")
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                error_message = str(e)
                 # #region agent log
                 try:
                     log_data = {
                         "sessionId": "debug-session",
                         "runId": "run1",
-                        "hypothesisId": "TIMEOUT_URL",
-                        "location": "transcriber.py:130",
-                        "message": "Using URL-based transcription for large file",
+                        "hypothesisId": "TRANSCRIBE_S3_UPLOAD_FAILED",
+                        "location": "transcriber.py:upload_audio",
+                        "message": "S3 upload failed for transcription",
                         "data": {
-                            "file_size_mb": round(audio_file_size_mb, 2),
-                            "s3_bucket": settings.s3_bucket_name
+                            "error_code": error_code,
+                            "error_message": error_message,
+                            "s3_bucket": self.s3_bucket,
+                            "s3_key": s3_audio_key,
+                            "audio_path": audio_path
                         },
-                        "timestamp": int(__import__("time").time() * 1000)
+                        "timestamp": int(time.time() * 1000)
                     }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
                         f.write(json.dumps(log_data) + "\n")
                 except Exception:
                     pass
                 # #endregion
                 
-                # Upload to S3 first, then transcribe from URL
-                import boto3
-                from pathlib import Path
-                import uuid
-                
-                client_kwargs = {
-                    'aws_access_key_id': settings.aws_access_key_id,
-                    'aws_secret_access_key': settings.aws_secret_access_key,
-                    'region_name': settings.aws_region
-                }
-                if settings.aws_session_token:
-                    client_kwargs['aws_session_token'] = settings.aws_session_token
-                
-                s3_client = boto3.client('s3', **client_kwargs)
-                
-                # Upload audio to S3
-                audio_filename = Path(audio_path).name
-                s3_key_to_cleanup = f"audio/{uuid.uuid4()}_{audio_filename}"
-                
-                try:
-                    s3_client.upload_file(audio_path, settings.s3_bucket_name, s3_key)
-                    # Generate presigned URL (valid for 1 hour)
-                    audio_url = s3_client.generate_presigned_url(
-                        'get_object',
-                        Params={'Bucket': settings.s3_bucket_name, 'Key': s3_key_to_cleanup},
-                        ExpiresIn=3600
+                if error_code == 'InvalidAccessKeyId':
+                    raise ValueError(
+                        f"AWS Access Key ID is invalid. Please check your AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables. "
+                        f"Error: {error_message}"
                     )
-                    
-                    # Use URL-based transcription
-                    payload: FileSource = {
-                        "url": audio_url,
-                    }
-                except Exception as s3_err:
-                    # Fallback to buffer if S3 upload fails
-                    print(f"Warning: S3 upload failed ({s3_err}), falling back to buffer upload")
-                    s3_key_to_cleanup = None  # Don't cleanup if upload failed
-                    payload: FileSource = {
-                        "buffer": buffer_data,
-                    }
-            else:
-                # Use buffer-based transcription for smaller files
-                payload: FileSource = {
-                    "buffer": buffer_data,
+                elif error_code == 'NoSuchBucket':
+                    raise ValueError(
+                        f"S3 bucket '{self.s3_bucket}' does not exist. Please create the bucket or update S3_BUCKET_NAME. "
+                        f"Error: {error_message}"
+                    )
+                elif error_code == 'AccessDenied':
+                    raise ValueError(
+                        f"Access denied to S3 bucket '{self.s3_bucket}'. Please check IAM permissions for s3:PutObject. "
+                        f"Error: {error_message}"
+                    )
+                else:
+                    raise ValueError(
+                        f"Failed to upload audio to S3 for transcription: {error_code} - {error_message}"
+                    )
+            
+            # Get S3 URI
+            s3_uri = f"s3://{self.s3_bucket}/{s3_audio_key}"
+            
+            # Determine media format from file extension
+            audio_ext = Path(audio_path).suffix.lower()
+            media_format_map = {
+                '.mp3': 'mp3',
+                '.mp4': 'mp4',
+                '.wav': 'wav',
+                '.flac': 'flac',
+                '.ogg': 'ogg',
+                '.amr': 'amr',
+                '.webm': 'webm',
+                '.m4a': 'mp4'
+            }
+            media_format = media_format_map.get(audio_ext, 'mp3')
+            
+            # Configure transcription settings
+            transcription_settings = {
+                'TranscriptionJobName': job_name,
+                'Media': {'MediaFileUri': s3_uri},
+                'MediaFormat': media_format,
+                'LanguageCode': 'en-US',
+                'OutputBucketName': self.s3_bucket,
+                'OutputKey': s3_output_key,
+                'Settings': {
+                    'ShowSpeakerLabels': enable_speaker_diarization,
+                    'MaxSpeakerLabels': 10 if enable_speaker_diarization else 0
                 }
+            }
             
-            # #region agent log
-            try:
-                listen_obj = getattr(self.client, "listen", None)
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "A",
-                    "location": "transcriber.py:87",
-                    "message": "Inspecting listen object structure",
-                    "data": {
-                        "listen_obj_type": str(type(listen_obj)) if listen_obj else None,
-                        "listen_obj_attrs": [attr for attr in dir(listen_obj) if not attr.startswith("_")] if listen_obj else None,
-                        "has_rest": hasattr(listen_obj, "rest") if listen_obj else False,
-                        "has_prerecorded": hasattr(listen_obj, "prerecorded") if listen_obj else False,
-                        "has_v": hasattr(listen_obj, "v") if listen_obj else False,
-                        "has_transcribe_file": hasattr(listen_obj, "transcribe_file") if listen_obj else False
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception as log_err:
-                try:
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "A",
-                        "location": "transcriber.py:87",
-                        "message": "Error inspecting listen object",
-                        "data": {"error": str(log_err)},
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-            # #endregion
-            
-            # #region agent log
-            try:
-                listen_obj = getattr(self.client, "listen", None)
-                if listen_obj:
-                    prerecorded_obj = getattr(listen_obj, "prerecorded", None) if hasattr(listen_obj, "prerecorded") else None
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "B",
-                        "location": "transcriber.py:120",
-                        "message": "Inspecting prerecorded object if exists",
-                        "data": {
-                            "prerecorded_obj_type": str(type(prerecorded_obj)) if prerecorded_obj else None,
-                            "prerecorded_obj_attrs": [attr for attr in dir(prerecorded_obj) if not attr.startswith("_")] if prerecorded_obj else None,
-                            "has_v": hasattr(prerecorded_obj, "v") if prerecorded_obj else False,
-                            "has_transcribe_file": hasattr(prerecorded_obj, "transcribe_file") if prerecorded_obj else False
-                        },
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-            except Exception as log_err:
-                try:
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "B",
-                        "location": "transcriber.py:120",
-                        "message": "Error inspecting prerecorded object",
-                        "data": {"error": str(log_err)},
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-            # #endregion
-            
+            # Start transcription job
             # #region agent log
             try:
                 log_data = {
                     "sessionId": "debug-session",
                     "runId": "run1",
-                    "hypothesisId": "C",
-                    "location": "transcriber.py:150",
-                    "message": "About to attempt API call - testing rest path",
+                    "hypothesisId": "TRANSCRIBE_B",
+                    "location": "transcriber.py:start_job",
+                    "message": "Starting AWS Transcribe job",
                     "data": {
-                        "attempting_path": "client.listen.rest.v('1').transcribe_file",
-                        "payload_size": len(buffer_data),
-                        "options_model": options.model if hasattr(options, "model") else None
+                        "job_name": job_name,
+                        "media_format": media_format,
+                        "speaker_diarization": enable_speaker_diarization
                     },
-                    "timestamp": int(__import__("time").time() * 1000)
+                    "timestamp": int(time.time() * 1000)
                 }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
                     f.write(json.dumps(log_data) + "\n")
             except Exception:
                 pass
             # #endregion
             
-            # #region agent log
-            try:
-                v1_obj = self.client.listen.prerecorded.v("1")
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "E",
-                    "location": "transcriber.py:200",
-                    "message": "Inspecting v('1') return object",
-                    "data": {
-                        "v1_obj_type": str(type(v1_obj)),
-                        "v1_obj_attrs": [attr for attr in dir(v1_obj) if not attr.startswith("_")],
-                        "has_transcribe_file": hasattr(v1_obj, "transcribe_file"),
-                        "has_transcribe": hasattr(v1_obj, "transcribe"),
-                        "has_transcribe_url": hasattr(v1_obj, "transcribe_url")
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception as log_err:
-                try:
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "E",
-                        "location": "transcriber.py:200",
-                        "message": "Error inspecting v('1') object",
-                        "data": {"error": str(log_err), "error_type": str(type(log_err).__name__)},
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-            # #endregion
+            self.transcribe_client.start_transcription_job(**transcription_settings)
             
-            # #region agent log
-            try:
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "FIX",
-                    "location": "transcriber.py:225",
-                    "message": "Attempting corrected API call",
-                    "data": {
-                        "corrected_path": "client.listen.prerecorded.v('1').transcribe_file"
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
+            # Poll for job completion
+            max_wait_time = 3600  # 1 hour max wait
+            poll_interval = 5  # Check every 5 seconds
+            elapsed_time = 0
             
-            # #region agent log
-            try:
-                import time
-                api_call_start = time.time()
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "TIMEOUT_D",
-                    "location": "transcriber.py:250",
-                    "message": "About to call Deepgram transcribe_file API",
-                    "data": {
-                        "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2),
-                        "api_call_start_time": api_call_start
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            
-            # Use transcribe_file with timeout handling
-            # Deepgram SDK should handle timeouts, but we'll wrap it to catch timeout errors
-            # For very large files, URL-based transcription is more reliable
-            try:
-                # #region agent log
-                try:
-                    payload_type = "url" if "url" in payload else "buffer"
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "TIMEOUT_G",
-                        "location": "transcriber.py:320",
-                        "message": "Calling transcribe_file with payload",
-                        "data": {
-                            "payload_type": payload_type,
-                            "has_url": "url" in payload,
-                            "has_buffer": "buffer" in payload,
-                            "buffer_size_mb": round(len(payload.get("buffer", b"")) / (1024 * 1024), 2) if "buffer" in payload else 0
-                        },
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-                # #endregion
-                
-                response = self.client.listen.prerecorded.v("1").transcribe_file(
-                    payload, options
+            while elapsed_time < max_wait_time:
+                response = self.transcribe_client.get_transcription_job(
+                    TranscriptionJobName=job_name
                 )
                 
-                # #region agent log
-                try:
-                    api_call_end = time.time()
-                    api_call_duration = api_call_end - api_call_start
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "TIMEOUT_E",
-                        "location": "transcriber.py:270",
-                        "message": "Deepgram API call completed successfully",
-                        "data": {
-                            "api_call_duration_seconds": round(api_call_duration, 2),
-                            "success": True
-                        },
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-                # #endregion
-            except Exception as api_err:
-                # #region agent log
-                try:
-                    api_call_end = time.time()
-                    api_call_duration = api_call_end - api_call_start if 'api_call_start' in locals() else None
-                    error_str = str(api_err).lower()
-                    is_timeout = 'timeout' in error_str or 'timed out' in error_str
-                    log_data = {
-                        "sessionId": "debug-session",
-                        "runId": "run1",
-                        "hypothesisId": "TIMEOUT_F",
-                        "location": "transcriber.py:285",
-                        "message": "Deepgram API call failed",
-                        "data": {
-                            "error_type": str(type(api_err).__name__),
-                            "error_message": str(api_err),
-                            "is_timeout_error": is_timeout,
-                            "api_call_duration_seconds": round(api_call_duration, 2) if api_call_duration else None,
-                            "buffer_size_mb": round(len(buffer_data) / (1024 * 1024), 2)
-                        },
-                        "timestamp": int(__import__("time").time() * 1000)
-                    }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except Exception:
-                    pass
-                # #endregion
-                raise
-            
-            # #region agent log
-            try:
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "G",
-                    "location": "transcriber.py:240",
-                    "message": "Inspecting response object structure",
-                    "data": {
-                        "response_type": str(type(response)),
-                        "response_attrs": [attr for attr in dir(response) if not attr.startswith("_")],
-                        "has_results": hasattr(response, "results")
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            
-            # #region agent log
-            try:
-                results_obj = getattr(response, "results", None)
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "H",
-                    "location": "transcriber.py:260",
-                    "message": "Inspecting response.results structure",
-                    "data": {
-                        "results_type": str(type(results_obj)) if results_obj else None,
-                        "results_attrs": [attr for attr in dir(results_obj) if not attr.startswith("_")] if results_obj else None,
-                        "has_channels": hasattr(results_obj, "channels") if results_obj else False
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            
-            # Parse response
-            segments = []
-            
-            if response.results and response.results.channels:
-                channel = response.results.channels[0]
+                job_status = response['TranscriptionJob']['TranscriptionJobStatus']
                 
                 # #region agent log
                 try:
                     log_data = {
                         "sessionId": "debug-session",
                         "runId": "run1",
-                        "hypothesisId": "I",
-                        "location": "transcriber.py:285",
-                        "message": "Inspecting channel structure",
+                        "hypothesisId": "TRANSCRIBE_C",
+                        "location": "transcriber.py:poll",
+                        "message": "Polling transcription job status",
                         "data": {
-                            "channel_type": str(type(channel)),
-                            "channel_attrs": [attr for attr in dir(channel) if not attr.startswith("_")],
-                            "has_alternatives": hasattr(channel, "alternatives")
+                            "job_name": job_name,
+                            "status": job_status,
+                            "elapsed_seconds": elapsed_time
                         },
-                        "timestamp": int(__import__("time").time() * 1000)
+                        "timestamp": int(time.time() * 1000)
                     }
-                    with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
                         f.write(json.dumps(log_data) + "\n")
                 except Exception:
                     pass
                 # #endregion
                 
-                if channel.alternatives:
-                    alternative = channel.alternatives[0]
-                    
-                    # #region agent log
-                    try:
-                        log_data = {
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "J",
-                            "location": "transcriber.py:305",
-                            "message": "Inspecting alternative object structure",
-                            "data": {
-                                "alternative_type": str(type(alternative)),
-                                "alternative_attrs": [attr for attr in dir(alternative) if not attr.startswith("_")],
-                                "has_utterances": hasattr(alternative, "utterances"),
-                                "has_words": hasattr(alternative, "words"),
-                                "has_paragraphs": hasattr(alternative, "paragraphs"),
-                                "has_transcript": hasattr(alternative, "transcript")
-                            },
-                            "timestamp": int(__import__("time").time() * 1000)
-                        }
-                        with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                            f.write(json.dumps(log_data) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
-                    
-                    # #region agent log
-                    try:
-                        log_data = {
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "K",
-                            "location": "transcriber.py:325",
-                            "message": "Checking if utterances exist at channel level",
-                            "data": {
-                                "channel_has_utterances": hasattr(channel, "utterances"),
-                                "results_has_utterances": hasattr(response.results, "utterances") if hasattr(response, "results") else False
-                            },
-                            "timestamp": int(__import__("time").time() * 1000)
-                        }
-                        with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                            f.write(json.dumps(log_data) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion
-                    
-                    # #region agent log
-                    try:
-                        utterances_list = getattr(response.results, "utterances", None) if hasattr(response, "results") else None
-                        log_data = {
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "FIX2",
-                            "location": "transcriber.py:360",
-                            "message": "Accessing utterances from results level",
-                            "data": {
-                                "utterances_type": str(type(utterances_list)) if utterances_list else None,
-                                "utterances_count": len(utterances_list) if utterances_list else 0,
-                                "utterances_attrs": [attr for attr in dir(utterances_list[0]) if not attr.startswith("_")] if utterances_list and len(utterances_list) > 0 else None
-                            },
-                            "timestamp": int(__import__("time").time() * 1000)
-                        }
-                        with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                            f.write(json.dumps(log_data) + "\n")
-                    except Exception as log_err:
-                        try:
-                            log_data = {
-                                "sessionId": "debug-session",
-                                "runId": "run1",
-                                "hypothesisId": "FIX2",
-                                "location": "transcriber.py:360",
-                                "message": "Error accessing utterances from results",
-                                "data": {"error": str(log_err)},
-                                "timestamp": int(__import__("time").time() * 1000)
-                            }
-                            with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                                f.write(json.dumps(log_data) + "\n")
-                        except Exception:
-                            pass
-                    # #endregion
-                    
-                    # Process utterances (segments) - utterances are at response.results.utterances, not alternative.utterances
-                    if response.results.utterances:
-                        for utterance in response.results.utterances:
-                            words = []
-                            
-                            # Extract word-level timestamps
-                            if alternative.words:
-                                for word_obj in alternative.words:
-                                    # Find words in this utterance
-                                    if (word_obj.start >= utterance.start and
-                                        word_obj.end <= utterance.end):
-                                        words.append(TranscriptWord(
-                                            word=word_obj.word,
-                                            start=word_obj.start,
-                                            end=word_obj.end,
-                                            speaker=word_obj.speaker if hasattr(word_obj, 'speaker') else None
-                                        ))
-                            
-                            segments.append(TranscriptSegment(
-                                text=utterance.transcript,
-                                start=utterance.start,
-                                end=utterance.end,
-                                words=words,
-                                speaker=utterance.speaker if hasattr(utterance, 'speaker') else None
-                            ))
+                if job_status == 'COMPLETED':
+                    break
+                elif job_status == 'FAILED':
+                    failure_reason = response['TranscriptionJob'].get('FailureReason', 'Unknown error')
+                    raise RuntimeError(f"AWS Transcribe job failed: {failure_reason}")
+                
+                time.sleep(poll_interval)
+                elapsed_time += poll_interval
+            
+            if elapsed_time >= max_wait_time:
+                raise RuntimeError("AWS Transcribe job timed out")
+            
+            # Get transcription results
+            transcript_uri = response['TranscriptionJob']['Transcript']['TranscriptFileUri']
+            
+            # Download transcript from S3
+            import urllib.parse
+            import urllib.request
+            import re
+            
+            # Parse the transcript URI - AWS Transcribe can return either:
+            # 1. S3 URI: s3://bucket-name/key/path.json
+            # 2. HTTPS URL: https://s3.region.amazonaws.com/bucket-name/key/path.json
+            # 3. HTTPS URL: https://bucket-name.s3.region.amazonaws.com/key/path.json
+            
+            parsed_uri = urllib.parse.urlparse(transcript_uri)
+            
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TRANSCRIBE_URI_PARSE",
+                    "location": "transcriber.py:parse_uri",
+                    "message": "Parsing transcript URI",
+                    "data": {
+                        "transcript_uri": transcript_uri,
+                        "scheme": parsed_uri.scheme,
+                        "netloc": parsed_uri.netloc,
+                        "path": parsed_uri.path
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
+            # Extract bucket and key based on URI format
+            if parsed_uri.scheme == 's3':
+                # S3 URI format: s3://bucket-name/key/path
+                transcript_bucket = parsed_uri.netloc
+                transcript_key = parsed_uri.path.lstrip('/')
+            elif parsed_uri.scheme in ('https', 'http'):
+                # HTTPS URL format - need to extract bucket from path or hostname
+                # Format 1: https://s3.region.amazonaws.com/bucket-name/key/path
+                # Format 2: https://bucket-name.s3.region.amazonaws.com/key/path
+                
+                # Check if bucket is in hostname (format 2)
+                s3_hostname_match = re.match(r'^([^.]+)\.s3[.-]([^.]+)\.amazonaws\.com$', parsed_uri.netloc)
+                if s3_hostname_match:
+                    transcript_bucket = s3_hostname_match.group(1)
+                    transcript_key = parsed_uri.path.lstrip('/')
+                else:
+                    # Format 1: bucket is first part of path
+                    path_parts = parsed_uri.path.lstrip('/').split('/', 1)
+                    if len(path_parts) >= 2:
+                        transcript_bucket = path_parts[0]
+                        transcript_key = path_parts[1]
                     else:
-                        # Fallback: use paragraphs or full transcript
-                        if alternative.paragraphs:
-                            for para in alternative.paragraphs.transcript:
-                                segments.append(TranscriptSegment(
-                                    text=para,
-                                    start=0.0,
-                                    end=0.0,
-                                    words=[],
-                                    speaker=None
-                                ))
-                        elif alternative.transcript:
-                            segments.append(TranscriptSegment(
-                                text=alternative.transcript,
-                                start=0.0,
-                                end=0.0,
-                                words=[],
-                                speaker=None
-                            ))
+                        # Fallback: try to extract from netloc if it's a bucket subdomain
+                        # This handles edge cases
+                        transcript_bucket = None
+                        transcript_key = parsed_uri.path.lstrip('/')
+                        raise ValueError(f"Could not parse bucket from transcript URI: {transcript_uri}")
+            else:
+                raise ValueError(f"Unsupported URI scheme in transcript URI: {transcript_uri}")
             
-            # Clean up S3 file if we used URL-based transcription
-            if s3_key_to_cleanup:
+            # #region agent log
+            try:
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "TRANSCRIBE_D",
+                    "location": "transcriber.py:download",
+                    "message": "Downloading transcription results",
+                    "data": {
+                        "transcript_uri": transcript_uri,
+                        "parsed_bucket": transcript_bucket,
+                        "parsed_key": transcript_key,
+                        "configured_bucket": self.s3_bucket,
+                        "output_key": s3_output_key
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
+            # Try to download transcript JSON
+            # AWS Transcribe writes to the bucket/key we specified, so try that first
+            transcript_data = None
+            try:
+                # First, try the configured bucket with the output key we specified
+                # This is the most reliable method since we control these values
+                print(f"Attempting to download transcript from configured bucket: s3://{self.s3_bucket}/{s3_output_key}")
+                transcript_obj = self.s3_client.get_object(Bucket=self.s3_bucket, Key=s3_output_key)
+                transcript_data = json.loads(transcript_obj['Body'].read().decode('utf-8'))
+                print(f"Successfully downloaded transcript from configured bucket")
+            except ClientError as configured_error:
+                # If that fails, try the parsed bucket/key from the URI
                 try:
-                    import boto3
-                    client_kwargs = {
-                        'aws_access_key_id': settings.aws_access_key_id,
-                        'aws_secret_access_key': settings.aws_secret_access_key,
-                        'region_name': settings.aws_region
-                    }
-                    if settings.aws_session_token:
-                        client_kwargs['aws_session_token'] = settings.aws_session_token
-                    s3_client = boto3.client('s3', **client_kwargs)
-                    s3_client.delete_object(Bucket=settings.s3_bucket_name, Key=s3_key_to_cleanup)
-                except Exception as cleanup_err:
-                    print(f"Warning: Failed to cleanup S3 file {s3_key_to_cleanup}: {cleanup_err}")
+                    print(f"Configured bucket failed, trying parsed URI bucket: s3://{transcript_bucket}/{transcript_key}")
+                    transcript_obj = self.s3_client.get_object(Bucket=transcript_bucket, Key=transcript_key)
+                    transcript_data = json.loads(transcript_obj['Body'].read().decode('utf-8'))
+                    print(f"Successfully downloaded transcript from parsed URI bucket")
+                except ClientError as s3_error:
+                    error_code = s3_error.response.get('Error', {}).get('Code', '')
+                    # If AccessDenied or other error, try HTTP download
+                    if error_code == 'AccessDenied' or error_code:
+                        try:
+                            print(f"Warning: S3 access failed ({error_code}), attempting HTTP download from transcript URI")
+                            # Try the original transcript URI (might be HTTPS)
+                            req = urllib.request.Request(transcript_uri)
+                            # Add headers to avoid 403 errors
+                            req.add_header('User-Agent', 'Mozilla/5.0')
+                            with urllib.request.urlopen(req, timeout=30) as response:
+                                transcript_data = json.loads(response.read().decode('utf-8'))
+                            print(f"Successfully downloaded transcript via HTTP")
+                        except urllib.error.HTTPError as http_error:
+                            # If HTTP fails, the transcript should be in the configured bucket with output key
+                            try:
+                                print(f"Warning: HTTP download failed ({http_error.code}), trying configured bucket with output key")
+                                transcript_obj = self.s3_client.get_object(
+                                    Bucket=self.s3_bucket,
+                                    Key=s3_output_key
+                                )
+                                transcript_data = json.loads(transcript_obj['Body'].read().decode('utf-8'))
+                                print(f"Successfully downloaded transcript from configured bucket")
+                            except Exception as final_error:
+                                raise RuntimeError(
+                                    f"Failed to download transcript from S3. Tried multiple methods:\n"
+                                    f"1. Configured bucket '{self.s3_bucket}' with output key '{s3_output_key}': {str(configured_error)}\n"
+                                    f"2. Parsed URI bucket '{transcript_bucket}' with key '{transcript_key}': {str(s3_error)}\n"
+                                    f"3. HTTP download from URI: {str(http_error)}\n"
+                                    f"4. Configured bucket with output key (retry): {str(final_error)}\n"
+                                    f"Please ensure your AWS credentials have s3:GetObject permission for bucket '{self.s3_bucket}'."
+                                ) from final_error
+                        except Exception as http_error:
+                            # If HTTP fails for other reasons, try the configured bucket with output key
+                            try:
+                                print(f"Warning: HTTP download failed, trying configured bucket with output key")
+                                transcript_obj = self.s3_client.get_object(
+                                    Bucket=self.s3_bucket,
+                                    Key=s3_output_key
+                                )
+                                transcript_data = json.loads(transcript_obj['Body'].read().decode('utf-8'))
+                                print(f"Successfully downloaded transcript from configured bucket")
+                            except Exception as final_error:
+                                raise RuntimeError(
+                                    f"Failed to download transcript from S3. Tried multiple methods:\n"
+                                    f"1. Configured bucket '{self.s3_bucket}' with output key '{s3_output_key}': {str(configured_error)}\n"
+                                    f"2. Parsed URI bucket '{transcript_bucket}' with key '{transcript_key}': {str(s3_error)}\n"
+                                    f"3. HTTP download from URI: {str(http_error)}\n"
+                                    f"4. Configured bucket with output key (retry): {str(final_error)}\n"
+                                    f"Please ensure your AWS credentials have s3:GetObject permission for bucket '{self.s3_bucket}'."
+                                ) from final_error
+                    else:
+                        raise RuntimeError(
+                            f"Failed to download transcript from S3 bucket '{transcript_bucket}'. "
+                            f"Please ensure your AWS credentials have s3:GetObject permission. "
+                            f"Error: {str(s3_error)}"
+                        ) from s3_error
+            
+            # Parse transcript into segments
+            segments = self._parse_transcript(transcript_data, enable_word_timestamps)
+            
+            # Clean up S3 files
+            try:
+                self.s3_client.delete_object(Bucket=self.s3_bucket, Key=s3_audio_key)
+                self.s3_client.delete_object(Bucket=transcript_bucket, Key=transcript_key)
+            except Exception as cleanup_err:
+                print(f"Warning: Failed to cleanup S3 files: {cleanup_err}")
+            
+            # Delete transcription job
+            try:
+                self.transcribe_client.delete_transcription_job(TranscriptionJobName=job_name)
+            except Exception:
+                pass  # Job deletion is optional
             
             return segments
         
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            error_message = str(e)
+            raise RuntimeError(f"AWS Transcribe error ({error_code}): {error_message}") from e
         except Exception as e:
-            # Clean up S3 file on error if we used URL-based transcription
-            if 's3_key_to_cleanup' in locals() and s3_key_to_cleanup:
-                try:
-                    import boto3
-                    client_kwargs = {
-                        'aws_access_key_id': settings.aws_access_key_id,
-                        'aws_secret_access_key': settings.aws_secret_access_key,
-                        'region_name': settings.aws_region
-                    }
-                    if settings.aws_session_token:
-                        client_kwargs['aws_session_token'] = settings.aws_session_token
-                    s3_client = boto3.client('s3', **client_kwargs)
-                    s3_client.delete_object(Bucket=settings.s3_bucket_name, Key=s3_key_to_cleanup)
-                except Exception:
-                    pass
-            # #region agent log
+            # Clean up on error
             try:
-                log_data = {
-                    "sessionId": "debug-session",
-                    "runId": "run1",
-                    "hypothesisId": "C",
-                    "location": "transcriber.py:124",
-                    "message": "Exception caught during transcription",
-                    "data": {
-                        "error_type": str(type(e).__name__),
-                        "error_message": str(e),
-                        "error_args": str(e.args) if hasattr(e, "args") else None
-                    },
-                    "timestamp": int(__import__("time").time() * 1000)
-                }
-                with open("/Users/william.holden/Documents/meeting_summary_demo/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps(log_data) + "\n")
+                self.s3_client.delete_object(Bucket=self.s3_bucket, Key=s3_audio_key)
             except Exception:
                 pass
-            # #endregion
-            raise RuntimeError(f"Deepgram transcription error: {str(e)}") from e
-
+            raise RuntimeError(f"AWS Transcribe error: {str(e)}") from e
+    
+    def _parse_transcript(
+        self,
+        transcript_data: dict,
+        enable_word_timestamps: bool
+    ) -> List[TranscriptSegment]:
+        """Parse AWS Transcribe JSON response into transcript segments."""
+        segments = []
+        
+        results = transcript_data.get('results', {})
+        items = results.get('items', [])
+        
+        if not items:
+            return segments
+        
+        # Group items into segments (by speaker if available, or by punctuation)
+        current_segment_items = []
+        current_speaker = None
+        segment_start = None
+        
+        speaker_labels = results.get('speaker_labels', {}).get('segments', [])
+        speaker_map = {}
+        for label in speaker_labels:
+            speaker_map[label['start_time']] = label.get('speaker_label', 'spk_0')
+        
+        for item in items:
+            item_type = item.get('type')
+            if item_type == 'punctuation':
+                # Add punctuation to current segment
+                if current_segment_items:
+                    current_segment_items.append(item)
+            else:
+                # Check if we should start a new segment
+                start_time = float(item.get('start_time', 0))
+                end_time = float(item.get('end_time', 0))
+                
+                # Get speaker for this item
+                item_speaker = None
+                for label in speaker_labels:
+                    if float(label['start_time']) <= start_time <= float(label['end_time']):
+                        speaker_label = label.get('speaker_label', 'spk_0')
+                        # Convert spk_0, spk_1 to 0, 1
+                        item_speaker = int(speaker_label.replace('spk_', '')) if 'spk_' in speaker_label else None
+                        break
+                
+                # Start new segment if speaker changed or if this is first item
+                if current_speaker is not None and item_speaker != current_speaker:
+                    # Finalize current segment
+                    if current_segment_items:
+                        segment = self._create_segment_from_items(
+                            current_segment_items,
+                            current_speaker,
+                            enable_word_timestamps
+                        )
+                        if segment:
+                            segments.append(segment)
+                    
+                    # Start new segment
+                    current_segment_items = [item]
+                    current_speaker = item_speaker
+                    segment_start = start_time
+                else:
+                    # Continue current segment
+                    if current_speaker is None:
+                        current_speaker = item_speaker
+                        segment_start = start_time
+                    current_segment_items.append(item)
+        
+        # Finalize last segment
+        if current_segment_items:
+            segment = self._create_segment_from_items(
+                current_segment_items,
+                current_speaker,
+                enable_word_timestamps
+            )
+            if segment:
+                segments.append(segment)
+        
+        # If no segments created (no speaker labels), create one segment from all items
+        if not segments and items:
+            segment = self._create_segment_from_items(items, None, enable_word_timestamps)
+            if segment:
+                segments.append(segment)
+        
+        return segments
+    
+    def _create_segment_from_items(
+        self,
+        items: List[dict],
+        speaker: Optional[int],
+        enable_word_timestamps: bool
+    ) -> Optional[TranscriptSegment]:
+        """Create a transcript segment from a list of items."""
+        if not items:
+            return None
+        
+        words = []
+        text_parts = []
+        
+        for item in items:
+            content = item.get('alternatives', [{}])[0].get('content', '')
+            if content:
+                text_parts.append(content)
+            
+            if enable_word_timestamps and item.get('type') == 'pronunciation':
+                start_time = float(item.get('start_time', 0))
+                end_time = float(item.get('end_time', 0))
+                words.append(TranscriptWord(
+                    word=content,
+                    start=start_time,
+                    end=end_time,
+                    speaker=speaker
+                ))
+        
+        if not text_parts:
+            return None
+        
+        # Get segment timing from first and last items
+        first_item = items[0]
+        last_item = items[-1]
+        segment_start = float(first_item.get('start_time', 0))
+        segment_end = float(last_item.get('end_time', segment_start))
+        
+        text = ' '.join(text_parts)
+        
+        return TranscriptSegment(
+            text=text,
+            start=segment_start,
+            end=segment_end,
+            words=words,
+            speaker=speaker
+        )

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, Callable, List
 
 from app.config import settings
-from app.models.video import ProcessingStatus, ProcessingResults, ProcessingStep
+from app.models.video import ProcessingStatus, ProcessingResults, ProcessingStep, ProcessingOptions
 from app.storage import jobs_db
 from app.services.audio_extractor import AudioExtractor
 from app.services.scene_detector import SceneDetector
@@ -62,26 +62,52 @@ class VideoProcessor:
             if error:
                 jobs_db[job_id]["error"] = error
     
-    def process_video_async(self, job_id: str, video_path: str):
+    def process_video_async(self, job_id: str, video_path: str, processing_options: Optional[ProcessingOptions] = None):
         """Start video processing in a background thread."""
+        # #region agent log
+        try:
+            import json as json_module
+            import inspect
+            sig = inspect.signature(self.process_video_async)
+            log_data = {
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": "PROCESSOR_A",
+                "location": "video_processor.py:process_video_async_entry",
+                "message": "process_video_async called",
+                "data": {
+                    "job_id": job_id,
+                    "video_path": video_path,
+                    "has_processing_options": processing_options is not None,
+                    "signature": str(sig),
+                    "num_received_args": 3 if processing_options else 2,
+                    "locals_count": len(locals())
+                },
+                "timestamp": int(__import__("time").time() * 1000)
+            }
+            with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                f.write(json_module.dumps(log_data) + "\n")
+        except Exception:
+            pass
+        # #endregion
         thread = threading.Thread(
             target=self.process_video,
-            args=(job_id, video_path),
+            args=(job_id, video_path, processing_options),
             daemon=True
         )
         thread.start()
     
-    def process_video(self, job_id: str, video_path: str):
+    def process_video(self, job_id: str, video_path: str, processing_options: Optional[ProcessingOptions] = None):
         """
         Process video through the entire pipeline.
         
         Steps:
         1. Extract audio track
-        2. Detect scene changes
-        3. Extract frames at scene boundaries + periodic sampling
-        4. Fingerprint slides (CLIP + OCR)
-        5. Deduplicate slides
-        6. Transcribe audio
+        2. Transcribe audio
+        3. Detect scene changes
+        4. Extract frames at scene boundaries + periodic sampling
+        5. Fingerprint slides (CLIP + OCR)
+        6. Deduplicate slides
         7. Generate summary
         8. Align slides with transcript timestamps
         9. Save results
@@ -90,11 +116,11 @@ class VideoProcessor:
         all_steps = [
             ProcessingStep(name="Initializing", progress=0.0, status="in_progress"),
             ProcessingStep(name="Extracting audio", progress=0.0, status="pending"),
+            ProcessingStep(name="Transcribing audio", progress=0.0, status="pending"),
             ProcessingStep(name="Detecting scene changes", progress=0.0, status="pending"),
             ProcessingStep(name="Extracting frames", progress=0.0, status="pending"),
             ProcessingStep(name="Fingerprinting slides", progress=0.0, status="pending"),
             ProcessingStep(name="Deduplicating slides", progress=0.0, status="pending"),
-            ProcessingStep(name="Transcribing audio", progress=0.0, status="pending"),
             ProcessingStep(name="Generating summary", progress=0.0, status="pending"),
             ProcessingStep(name="Saving results", progress=0.0, status="pending"),
         ]
@@ -126,6 +152,29 @@ class VideoProcessor:
             )
         
         try:
+            # #region agent log
+            try:
+                import json as json_module
+                log_data = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "PROCESSOR_B",
+                    "location": "video_processor.py:process_video_entry",
+                    "message": "process_video called",
+                    "data": {
+                        "job_id": job_id,
+                        "video_path": str(video_path),
+                        "has_processing_options": processing_options is not None,
+                        "processing_options_type": str(type(processing_options).__name__) if processing_options else None
+                    },
+                    "timestamp": int(__import__("time").time() * 1000)
+                }
+                with open("/Users/william.holden/Documents/GitHub/meeting_summary_demo/.cursor/debug.log", "a") as f:
+                    f.write(json_module.dumps(log_data) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            
             update_step_progress("Initializing", 100.0)
             
             video_path = Path(video_path)
@@ -152,7 +201,20 @@ class VideoProcessor:
             if audio_path is None:
                 print("Warning: Video has no audio stream. Skipping transcription.")
             
-            # Step 2: Detect scene changes
+            # Step 2: Transcribe audio (if available)
+            transcript = []
+            if audio_path and self.transcriber:
+                update_step_progress("Transcribing audio", 0.0, "Sending audio to AWS Transcribe...")
+                transcript = self.transcriber.transcribe_audio(str(audio_path))
+                update_step_progress("Transcribing audio", 100.0, f"Transcribed {len(transcript)} segments")
+            elif not audio_path:
+                update_step_progress("Transcribing audio", 100.0, "Skipped (no audio)")
+                print("Warning: No audio stream in video. Skipping transcription.")
+            else:
+                update_step_progress("Transcribing audio", 100.0, "Skipped (transcriber unavailable)")
+                print("Warning: Transcriber not available, skipping transcription")
+            
+            # Step 3: Detect scene changes
             update_step_progress("Detecting scene changes", 0.0)
             s3_bucket = settings.s3_bucket_name
             s3_key = jobs_db.get(job_id, {}).get("s3_key")
@@ -163,7 +225,7 @@ class VideoProcessor:
             )
             update_step_progress("Detecting scene changes", 100.0, f"Found {len(scene_boundaries)} scene boundaries")
             
-            # Step 3: Extract frames
+            # Step 4: Extract frames
             update_step_progress("Extracting frames", 0.0)
             # Add progress callback for frame extraction
             import subprocess
@@ -196,7 +258,7 @@ class VideoProcessor:
             )
             update_step_progress("Extracting frames", 100.0, f"Extracted {len(frames)} frames")
             
-            # Step 4: Fingerprint slides
+            # Step 5: Fingerprint slides
             update_step_progress("Fingerprinting slides", 0.0)
             fingerprints_progress = [0]
             
@@ -211,23 +273,10 @@ class VideoProcessor:
             )
             update_step_progress("Fingerprinting slides", 100.0, f"Fingerprinted {len(fingerprints)} frames")
             
-            # Step 5: Deduplicate slides
+            # Step 6: Deduplicate slides
             update_step_progress("Deduplicating slides", 0.0)
             unique_slides = self.deduplicator.deduplicate_slides(fingerprints)
             update_step_progress("Deduplicating slides", 100.0, f"Found {len(unique_slides)} unique slides")
-            
-            # Step 6: Transcribe audio (if available)
-            transcript = []
-            if audio_path and self.transcriber:
-                update_step_progress("Transcribing audio", 0.0, "Sending audio to Deepgram...")
-                transcript = self.transcriber.transcribe_audio(str(audio_path))
-                update_step_progress("Transcribing audio", 100.0, f"Transcribed {len(transcript)} segments")
-            elif not audio_path:
-                update_step_progress("Transcribing audio", 100.0, "Skipped (no audio)")
-                print("Warning: No audio stream in video. Skipping transcription.")
-            else:
-                update_step_progress("Transcribing audio", 100.0, "Skipped (transcriber unavailable)")
-                print("Warning: Transcriber not available, skipping transcription")
             
             # Step 7: Generate summary
             summary = None

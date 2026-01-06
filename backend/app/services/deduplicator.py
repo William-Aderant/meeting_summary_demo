@@ -42,44 +42,81 @@ class SlideDeduplicator:
     def are_slides_similar(
         self,
         fingerprint1: SlideFingerprint,
-        fingerprint2: SlideFingerprint
+        fingerprint2: SlideFingerprint,
+        method: str = "both"
     ) -> bool:
         """
         Determine if two slides are similar (duplicates).
         
+        Args:
+            fingerprint1: First slide fingerprint
+            fingerprint2: Second slide fingerprint
+            method: Deduplication method - "both", "text_only", or "visual_only"
+        
         Slides are considered duplicates if:
-        - CLIP cosine similarity exceeds threshold, OR
-        - OCR text similarity exceeds threshold, OR
-        - Text hash matches exactly
+        - method="both": CLIP similarity OR text similarity OR exact text hash match
+        - method="text_only": text similarity OR exact text hash match
+        - method="visual_only": CLIP similarity only
         """
-        # Exact text hash match
+        # Exact text hash match (always checked regardless of method)
         if fingerprint1.text_hash and fingerprint2.text_hash:
             if fingerprint1.text_hash == fingerprint2.text_hash:
                 return True
         
-        # CLIP embedding similarity
-        if fingerprint1.embedding and fingerprint2.embedding:
-            clip_sim = self.cosine_similarity(
-                fingerprint1.embedding,
-                fingerprint2.embedding
-            )
-            if clip_sim >= self.clip_threshold:
-                return True
-        
-        # OCR text similarity
-        if fingerprint1.ocr_text and fingerprint2.ocr_text:
-            text_sim = self.text_similarity(
-                fingerprint1.ocr_text,
-                fingerprint2.ocr_text
-            )
-            if text_sim >= self.text_threshold:
-                return True
+        if method == "text_only":
+            # Only check text similarity
+            if fingerprint1.ocr_text and fingerprint2.ocr_text:
+                text_sim = self.text_similarity(
+                    fingerprint1.ocr_text,
+                    fingerprint2.ocr_text
+                )
+                if text_sim >= self.text_threshold:
+                    return True
+        elif method == "visual_only":
+            # Only check CLIP similarity
+            if not (fingerprint1.embedding and fingerprint2.embedding):
+                # CLIP embeddings not available - fallback to text if available
+                if fingerprint1.ocr_text and fingerprint2.ocr_text:
+                    text_sim = self.text_similarity(
+                        fingerprint1.ocr_text,
+                        fingerprint2.ocr_text
+                    )
+                    if text_sim >= self.text_threshold:
+                        return True
+                return False
+            if fingerprint1.embedding and fingerprint2.embedding:
+                clip_sim = self.cosine_similarity(
+                    fingerprint1.embedding,
+                    fingerprint2.embedding
+                )
+                if clip_sim >= self.clip_threshold:
+                    return True
+        else:  # method == "both"
+            # Check both CLIP and text similarity
+            # If CLIP embeddings are available, check them first
+            if fingerprint1.embedding and fingerprint2.embedding:
+                clip_sim = self.cosine_similarity(
+                    fingerprint1.embedding,
+                    fingerprint2.embedding
+                )
+                if clip_sim >= self.clip_threshold:
+                    return True
+            
+            # Always check text similarity (works even without CLIP)
+            if fingerprint1.ocr_text and fingerprint2.ocr_text:
+                text_sim = self.text_similarity(
+                    fingerprint1.ocr_text,
+                    fingerprint2.ocr_text
+                )
+                if text_sim >= self.text_threshold:
+                    return True
         
         return False
     
     def deduplicate_slides(
         self,
-        fingerprints: List[SlideFingerprint]
+        fingerprints: List[SlideFingerprint],
+        method: str = "both"
     ) -> List[UniqueSlide]:
         """
         Deduplicate slides and group appearances.
@@ -111,7 +148,7 @@ class SlideDeduplicator:
                 if j in processed:
                     continue
                 
-                if self.are_slides_similar(fp1, fp2):
+                if self.are_slides_similar(fp1, fp2, method=method):
                     slide_groups[group_id].append(j)
                     processed.add(j)
             

@@ -29,8 +29,9 @@ class MeetingSummaryResponse(BaseModel):
 
 class ResultsResponse(BaseModel):
     """Final results response model."""
-    summary: MeetingSummaryResponse
-    slides: list[UniqueSlideResponse]
+    summary: Optional[MeetingSummaryResponse] = None
+    slides: Optional[list[UniqueSlideResponse]] = None
+    transcript: Optional[list] = None
 
 
 

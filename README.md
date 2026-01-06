@@ -4,7 +4,7 @@ A full-stack web application that automatically processes meeting videos to extr
 
 ## Features
 
-- **Automated Transcription**: Uses Deepgram API for high-quality speech-to-text with word-level timestamps
+- **Automated Transcription**: Uses AWS Transcribe for high-quality speech-to-text with word-level timestamps and speaker diarization
 - **Intelligent Summarization**: Claude 3.5 Sonnet via Amazon Bedrock generates executive summaries, decisions, and action items
 - **Slide Detection & Deduplication**: 
   - Scene detection using AWS Rekognition
@@ -29,7 +29,7 @@ Frontend (Next.js) → Backend (FastAPI) → Processing Pipeline
 3. Frame extraction (FFmpeg)
 4. Slide fingerprinting (CLIP + OCR)
 5. Deduplication
-6. Transcription (Deepgram)
+6. Transcription (AWS Transcribe)
 7. Summarization (Claude Bedrock)
 8. Results assembly
 
@@ -39,10 +39,10 @@ Frontend (Next.js) → Backend (FastAPI) → Processing Pipeline
 - Node.js 18+
 - FFmpeg installed and in PATH
 - AWS account with access to:
-  - S3 (for video storage)
+  - S3 (for video storage and transcription)
+  - Transcribe (for speech-to-text)
   - Rekognition (for scene detection and OCR)
   - Bedrock (for Claude API)
-- Deepgram API key
 
 ## Installation
 
@@ -70,7 +70,6 @@ AWS_ACCESS_KEY_ID=your_key
 AWS_SECRET_ACCESS_KEY=your_secret
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=your-bucket
-DEEPGRAM_API_KEY=your_key
 BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
 ```
 
@@ -127,8 +126,7 @@ The application will be available at `http://localhost:3000`
 - `AWS_ACCESS_KEY_ID`: AWS access key
 - `AWS_SECRET_ACCESS_KEY`: AWS secret key
 - `AWS_REGION`: AWS region (default: us-east-1)
-- `S3_BUCKET_NAME`: S3 bucket for video storage
-- `DEEPGRAM_API_KEY`: Deepgram API key
+- `S3_BUCKET_NAME`: S3 bucket for video storage and transcription (required)
 - `BEDROCK_MODEL_ID`: Bedrock model ID (default: Claude 3.5 Sonnet)
 - `UPLOAD_DIR`: Local upload directory (default: ./uploads)
 - `TEMP_DIR`: Temporary processing directory (default: ./temp)
@@ -187,8 +185,8 @@ The first run will download the CLIP model (~500MB). Ensure you have internet co
 ### AWS credentials
 Ensure AWS credentials are properly configured. The application will fall back to local processing if AWS services are unavailable.
 
-### Deepgram/Bedrock errors
-Check that API keys are correct and services are accessible. The application will show warnings if services are unavailable.
+### AWS Transcribe/Bedrock errors
+Check that AWS credentials are correct and services are accessible. Ensure S3_BUCKET_NAME is configured as it's required for AWS Transcribe. The application will show warnings if services are unavailable.
 
 ## License
 

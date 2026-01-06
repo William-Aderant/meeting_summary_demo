@@ -54,17 +54,51 @@ export interface MeetingSummary {
   key_topics?: string[];
 }
 
+export interface ProcessingOptions {
+  enable_transcription: boolean;
+  enable_slide_detection: boolean;
+  enable_summarization: boolean;
+  enable_slide_summaries: boolean;
+  return_transcript: boolean;
+  return_slides: boolean;
+  deduplication_method: 'both' | 'text_only' | 'visual_only';
+}
+
 export interface ResultsResponse {
-  summary: MeetingSummary;
-  slides: UniqueSlide[];
+  summary?: MeetingSummary;
+  slides?: UniqueSlide[];
+  transcript?: any[];
 }
 
 /**
- * Upload a video file.
+ * Upload a video file with processing options.
  */
-export async function uploadVideo(file: File): Promise<UploadResponse> {
+export async function uploadVideo(
+  file: File,
+  options?: Partial<ProcessingOptions>
+): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append('file', file);
+  
+  // Add processing options as form fields
+  const defaultOptions: ProcessingOptions = {
+    enable_transcription: true,
+    enable_slide_detection: true,
+    enable_summarization: true,
+    enable_slide_summaries: false,
+    return_transcript: true,
+    return_slides: true,
+    deduplication_method: 'both',
+  };
+  
+  const finalOptions = { ...defaultOptions, ...options };
+  formData.append('enable_transcription', String(finalOptions.enable_transcription));
+  formData.append('enable_slide_detection', String(finalOptions.enable_slide_detection));
+  formData.append('enable_summarization', String(finalOptions.enable_summarization));
+  formData.append('enable_slide_summaries', String(finalOptions.enable_slide_summaries));
+  formData.append('return_transcript', String(finalOptions.return_transcript));
+  formData.append('return_slides', String(finalOptions.return_slides));
+  formData.append('deduplication_method', finalOptions.deduplication_method);
 
   const response = await api.post<UploadResponse>('/api/upload', formData, {
     headers: {

@@ -2,7 +2,8 @@
 
 import { useCallback, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { uploadVideo } from '@/lib/api';
+import { uploadVideo, ProcessingOptions } from '@/lib/api';
+import ProcessingOptionsPanel from './ProcessingOptions';
 
 interface VideoUploadProps {
   onUploadSuccess: (jobId: string) => void;
@@ -12,6 +13,15 @@ export default function VideoUpload({ onUploadSuccess }: VideoUploadProps) {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [processingOptions, setProcessingOptions] = useState<ProcessingOptions>({
+    enable_transcription: true,
+    enable_slide_detection: true,
+    enable_summarization: true,
+    enable_slide_summaries: false,
+    return_transcript: true,
+    return_slides: true,
+    deduplication_method: 'both',
+  });
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
@@ -47,7 +57,7 @@ export default function VideoUpload({ onUploadSuccess }: VideoUploadProps) {
         });
       }, 200);
 
-      const response = await uploadVideo(file);
+      const response = await uploadVideo(file, processingOptions);
       clearInterval(progressInterval);
       setProgress(100);
 
@@ -69,7 +79,12 @@ export default function VideoUpload({ onUploadSuccess }: VideoUploadProps) {
   });
 
   return (
-    <div className="w-full">
+    <div className="w-full space-y-4">
+      <ProcessingOptionsPanel
+        options={processingOptions}
+        onChange={setProcessingOptions}
+      />
+      
       <div
         {...getRootProps()}
         className={`

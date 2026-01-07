@@ -17,7 +17,7 @@ export default function VideoUpload({ onUploadSuccess }: VideoUploadProps) {
     enable_transcription: true,
     enable_slide_detection: true,
     enable_summarization: true,
-    enable_slide_summaries: false,
+    enable_slide_summaries: true,  // Enable per-slide summaries by default
     return_transcript: true,
     return_slides: true,
     deduplication_method: 'both',

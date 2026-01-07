@@ -1,5 +1,5 @@
 """Results response models."""
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -27,11 +27,28 @@ class MeetingSummaryResponse(BaseModel):
     key_topics: Optional[list[str]] = None
 
 
+class TranscriptWordResponse(BaseModel):
+    """Word-level transcript response."""
+    word: str
+    start: float
+    end: float
+    speaker: Optional[int] = None
+
+
+class TranscriptSegmentResponse(BaseModel):
+    """Transcript segment response."""
+    text: str
+    start: float
+    end: float
+    speaker: Optional[int] = None
+    words: List[TranscriptWordResponse] = []
+
+
 class ResultsResponse(BaseModel):
     """Final results response model."""
     summary: Optional[MeetingSummaryResponse] = None
     slides: Optional[list[UniqueSlideResponse]] = None
-    transcript: Optional[list] = None
+    transcript: Optional[List[TranscriptSegmentResponse]] = None
 
 
 

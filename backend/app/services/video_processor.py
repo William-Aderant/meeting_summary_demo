@@ -303,6 +303,20 @@ class VideoProcessor:
                     )
                 update_step_progress("Generating summary", 100.0, "Placeholder summary created")
             
+            # Step 7.5: Generate slide summaries if enabled
+            if processing_options and processing_options.enable_slide_summaries and self.summarizer and transcript:
+                update_step_progress("Generating summary", 50.0, "Generating individual slide summaries...")
+                total_slides = len(unique_slides)
+                for idx, slide in enumerate(unique_slides):
+                    try:
+                        slide_summary = self.summarizer.generate_slide_summary(slide, transcript)
+                        slide.discussion_summary = slide_summary
+                        progress = 50.0 + (idx + 1) / total_slides * 50.0
+                        update_step_progress("Generating summary", progress, f"Generated {idx + 1}/{total_slides} slide summaries")
+                    except Exception as e:
+                        print(f"Warning: Failed to generate summary for slide {slide.slide_id}: {e}")
+                        slide.discussion_summary = None
+            
             # Step 8: Get video duration
             import subprocess
             try:
@@ -350,10 +364,31 @@ class VideoProcessor:
                 "key_topics": summary.key_topics
             }
             
+            # Format transcript for response
+            transcript_response = []
+            if transcript and (not processing_options or processing_options.return_transcript):
+                for segment in transcript:
+                    transcript_response.append({
+                        "text": segment.text,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "speaker": segment.speaker,
+                        "words": [
+                            {
+                                "word": word.word,
+                                "start": word.start,
+                                "end": word.end,
+                                "speaker": word.speaker
+                            }
+                            for word in segment.words
+                        ] if segment.words else []
+                    })
+            
             # Save results
             results_data = {
                 "summary": summary_response,
-                "slides": slides_response
+                "slides": slides_response,
+                "transcript": transcript_response if transcript_response else None
             }
             
             results_file = results_dir / f"{job_id}_results.json"

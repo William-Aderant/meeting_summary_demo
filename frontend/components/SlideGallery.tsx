@@ -31,7 +31,7 @@ export default function SlideGallery({ slides, jobId }: SlideGalleryProps) {
         {slides.map((slide) => (
           <div
             key={slide.slide_id}
-            className="border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:shadow-lg transition-shadow"
+            className="border border-gray-200 rounded-lg overflow-hidden cursor-pointer hover:shadow-lg transition-shadow group"
             onClick={() => setSelectedSlide(slide)}
           >
             <div className="aspect-video bg-gray-100 relative">
@@ -43,14 +43,43 @@ export default function SlideGallery({ slides, jobId }: SlideGalleryProps) {
                   (e.target as HTMLImageElement).src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="300"%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999"%3EImage not available%3C/text%3E%3C/svg%3E';
                 }}
               />
+              {/* Overlay indicator for discussion summary */}
+              {slide.discussion_summary && (
+                <div className="absolute top-2 right-2 bg-blue-600 text-white p-1.5 rounded-full shadow-md" title="Has discussion summary">
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clipRule="evenodd" />
+                  </svg>
+                </div>
+              )}
             </div>
             <div className="p-3">
-              <p className="text-sm font-medium text-gray-900 mb-1">
-                {slide.slide_id}
-              </p>
-              <p className="text-xs text-gray-500">
-                Appeared {slide.appearances.length} time{slide.appearances.length !== 1 ? 's' : ''}
-              </p>
+              <div className="flex justify-between items-start mb-1">
+                <p className="text-sm font-medium text-gray-900">
+                  {slide.slide_id}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {slide.appearances.length}x
+                </p>
+              </div>
+              {/* Show discussion summary preview */}
+              {slide.discussion_summary ? (
+                <div className="mt-2">
+                  <p className="text-xs text-blue-600 font-medium mb-1">Discussion Summary:</p>
+                  <p className="text-xs text-gray-600 line-clamp-2">
+                    {slide.discussion_summary}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400 mt-2 italic">
+                  No discussion summary
+                </p>
+              )}
+              {/* Show OCR preview if available */}
+              {slide.ocr_text && (
+                <p className="text-xs text-gray-500 mt-2 line-clamp-1 opacity-0 group-hover:opacity-100 transition-opacity" title={slide.ocr_text}>
+                  📄 {slide.ocr_text.slice(0, 50)}...
+                </p>
+              )}
             </div>
           </div>
         ))}

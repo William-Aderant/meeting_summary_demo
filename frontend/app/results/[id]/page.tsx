@@ -6,6 +6,8 @@ import { getStatus, getResults, type ResultsResponse, type StatusResponse } from
 import ProcessingStatus from '@/components/ProcessingStatus';
 import SummaryPanel from '@/components/SummaryPanel';
 import SlideGallery from '@/components/SlideGallery';
+import TranscriptPanel from '@/components/TranscriptPanel';
+import DownloadButtons from '@/components/DownloadButtons';
 
 export default function ResultsPage() {
   const params = useParams();
@@ -95,8 +97,21 @@ export default function ResultsPage() {
 
         {status.status === 'complete' && results && (
           <div className="mt-8 space-y-8">
-            <SummaryPanel summary={results.summary} />
-            <SlideGallery slides={results.slides} jobId={jobId} />
+            {/* Download buttons at the top for easy access */}
+            <DownloadButtons jobId={jobId} />
+            
+            {/* Meeting Summary */}
+            {results.summary && <SummaryPanel summary={results.summary} />}
+            
+            {/* Slides with discussion summaries */}
+            {results.slides && results.slides.length > 0 && (
+              <SlideGallery slides={results.slides} jobId={jobId} />
+            )}
+            
+            {/* Full transcript */}
+            {results.transcript && results.transcript.length > 0 && (
+              <TranscriptPanel transcript={results.transcript} />
+            )}
           </div>
         )}
 

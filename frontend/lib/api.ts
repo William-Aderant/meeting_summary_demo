@@ -64,10 +64,25 @@ export interface ProcessingOptions {
   deduplication_method: 'both' | 'text_only' | 'visual_only';
 }
 
+export interface TranscriptWord {
+  word: string;
+  start: number;
+  end: number;
+  speaker?: number;
+}
+
+export interface TranscriptSegment {
+  text: string;
+  start: number;
+  end: number;
+  speaker?: number;
+  words?: TranscriptWord[];
+}
+
 export interface ResultsResponse {
   summary?: MeetingSummary;
   slides?: UniqueSlide[];
-  transcript?: any[];
+  transcript?: TranscriptSegment[];
 }
 
 /**
@@ -85,7 +100,7 @@ export async function uploadVideo(
     enable_transcription: true,
     enable_slide_detection: true,
     enable_summarization: true,
-    enable_slide_summaries: false,
+    enable_slide_summaries: true,  // Enable per-slide summaries by default
     return_transcript: true,
     return_slides: true,
     deduplication_method: 'both',

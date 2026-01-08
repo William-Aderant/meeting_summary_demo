@@ -138,7 +138,14 @@ class Summarizer:
             transcript_text = "\n".join(transcript_lines)
         
         # Create prompt for slide-specific summary
-        prompt = f"""You are analyzing a specific slide from a meeting presentation along with the discussion that occurred while this slide was shown.
+        prompt = f"""You are analyzing a specific slide from a Microsoft Teams meeting recording along with the discussion that occurred while this slide was shown.
+
+IMPORTANT CONTEXT ABOUT OCR TEXT:
+- This slide was captured from a Teams meeting screen share
+- Names appearing in the OCR text are typically participant names (real names from their Teams profiles)
+- These names may appear in meeting participant lists, chat panels, or video call participant galleries visible on screen
+- When you see names like "John Smith", "Jane Doe", etc. in the OCR text, these are likely meeting attendees
+- Use these names to attribute discussion points or identify who was present/speaking
 
 SLIDE CONTENT (OCR Text):
 {slide.ocr_text}
@@ -153,6 +160,7 @@ Please provide a concise summary (2-3 sentences) that:
 1. Describes what the slide shows based on its text content
 2. Summarizes the key points discussed while this slide was shown
 3. Highlights any decisions, questions, or important information related to this slide
+4. If participant names are visible in the OCR text, note who was present or being discussed
 
 If there was no discussion during the slide's appearance, focus on summarizing what the slide content indicates.
 

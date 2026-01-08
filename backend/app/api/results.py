@@ -48,6 +48,45 @@ def _load_results_data(job_id: str) -> dict:
         return json.load(f)
 
 
+def _format_ocr_text(results_data: dict) -> str:
+    """Format OCR text from all slides as plain text."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("SLIDES OCR TEXT")
+    lines.append("=" * 80)
+    lines.append("")
+    
+    slides = results_data.get("slides", [])
+    if slides:
+        for slide in slides:
+            slide_id = slide.get('slide_id', 'Unknown')
+            lines.append(f"Slide {slide_id}")
+            lines.append("-" * 80)
+            
+            appearances = slide.get("appearances", [])
+            if appearances:
+                app_str = ", ".join([
+                    f"{app.get('start', '')} - {app.get('end', '')}"
+                    for app in appearances
+                ])
+                lines.append(f"Appearances: {app_str}")
+            
+            ocr_text = slide.get("ocr_text", "")
+            if ocr_text:
+                lines.append("")
+                lines.append("OCR Text:")
+                lines.append(ocr_text)
+            else:
+                lines.append("No OCR text extracted for this slide.")
+            
+            lines.append("")
+            lines.append("")
+    else:
+        lines.append("No slides found in this recording.")
+    
+    return "\n".join(lines)
+
+
 def _format_results_as_txt(results_data: dict) -> str:
     """Format results as plain text."""
     lines = []
@@ -198,6 +237,23 @@ async def download_results_txt(job_id: str):
         media_type="text/plain",
         headers={
             "Content-Disposition": f'attachment; filename="meeting_summary_{job_id}.txt"'
+        }
+    )
+
+
+@router.get("/results/{job_id}/download/ocr")
+async def download_ocr_text(job_id: str):
+    """
+    Download OCR text from all slides as a plain text file.
+    """
+    results_data = _load_results_data(job_id)
+    ocr_content = _format_ocr_text(results_data)
+    
+    return Response(
+        content=ocr_content,
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="slides_ocr_{job_id}.txt"'
         }
     )
 

@@ -11,7 +11,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 export default function DownloadButtons({ jobId }: DownloadButtonsProps) {
   const [downloading, setDownloading] = useState<string | null>(null);
 
-  const handleDownload = async (format: 'txt' | 'pdf') => {
+  const handleDownload = async (format: 'txt' | 'pdf' | 'ocr') => {
     setDownloading(format);
     try {
       const response = await fetch(`${API_URL}/api/results/${jobId}/download/${format}`);
@@ -24,14 +24,22 @@ export default function DownloadButtons({ jobId }: DownloadButtonsProps) {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `meeting_summary_${jobId}.${format}`;
+      
+      // Set filename based on format
+      if (format === 'ocr') {
+        a.download = `slides_ocr_${jobId}.txt`;
+      } else {
+        a.download = `meeting_summary_${jobId}.${format}`;
+      }
+      
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
     } catch (error) {
       console.error('Download failed:', error);
-      alert(`Failed to download ${format.toUpperCase()} file. Please try again.`);
+      const formatName = format === 'ocr' ? 'OCR Text' : format.toUpperCase();
+      alert(`Failed to download ${formatName} file. Please try again.`);
     } finally {
       setDownloading(null);
     }
@@ -88,8 +96,31 @@ export default function DownloadButtons({ jobId }: DownloadButtonsProps) {
             <div className="text-xs text-gray-400">Plain text file</div>
           </div>
         </button>
+
+        {/* OCR Text Download */}
+        <button
+          onClick={() => handleDownload('ocr')}
+          disabled={downloading !== null}
+          className="flex items-center gap-3 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-medium rounded-lg transition-colors shadow-sm"
+        >
+          {downloading === 'ocr' ? (
+            <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+          ) : (
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+            </svg>
+          )}
+          <div className="text-left">
+            <div className="font-semibold">Download OCR</div>
+            <div className="text-xs text-emerald-200">Slide text content</div>
+          </div>
+        </button>
       </div>
     </div>
   );
 }
+
 
